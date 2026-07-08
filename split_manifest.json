@@ -1,0 +1,15 @@
+{
+  "source": "episodes_train.jsonl",
+  "seed": 2026,
+  "split_ratio": {
+    "train": 0.8,
+    "val": 0.1,
+    "test": 0.1
+  },
+  "counts": {
+    "episodes_train_split.jsonl": 134,
+    "episodes_val.jsonl": 17,
+    "episodes_test.jsonl": 16
+  },
+  "note": "Original source file is preserved; image paths remain relative to repository root."
+}
