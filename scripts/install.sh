@@ -1,3 +1,9 @@
-mkdir coin_env && cd $_ && python -m venv . && source bin/activate && cd .. 
-pip install retrying flask attrs gymnasium colorama accelerate transformers==4.43.1 Pillow opencv-python dotenv qwen-vl-utils huggingface_hub google-genai openai
-echo "Remember to export your GEMINI_API_KEY login token if you want to use it as the oracle. Check the README for instructions."
+#!/usr/bin/env bash
+set -euo pipefail
+
+python -m venv coin_env
+coin_env/bin/python -m ensurepip --upgrade
+coin_env/bin/python -m pip install \
+  numpy attrs gymnasium colorama Pillow python-dotenv openai retrying huggingface_hub
+
+echo "Install complete. Copy .env.example to .env and configure ARK_API_KEY and ARK_MODEL_ID."

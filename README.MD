@@ -3,12 +3,16 @@
 # Installation
 
 Run
-> source scripts/install.sh
+> bash scripts/install.sh
 
 This will create a new local environment will all the required packages.
 
 Next, download the required images
 > mkdir images && hf download --repo-type dataset e-zorzi/images_coin_challenge --local-dir images
+
+If the repository contains 131-byte Git LFS pointer files or Hugging Face is slow, use the bundled HF-Mirror downloader instead:
+
+> ./coin_env/bin/python scripts/download_images_mirror.py
 
 If you need `vllm` (see later), run
 
@@ -16,11 +20,30 @@ If you need `vllm` (see later), run
 
 This will create a *second* environment with vllm installed (this to avoid env pollution with the first).
 
+# 使用豆包（火山方舟）运行
+
+默认的 Questioner 和 Oracle 都使用豆包的图片理解端点。复制 `.env.example` 为 `.env`，并填入 `ARK_API_KEY` 和支持图片理解的 `ARK_MODEL_ID`。请勿提交 `.env`。
+
+> cp .env.example .env
+
+先用一个小切片验证完整链路：
+
+> ./coin_env/bin/python eval_model.py 0 3 --description-type category
+
+Set `ARK_TIMEOUT_SECONDS` to change the default 90-second API request timeout.
+The default sets `ARK_THINKING=disabled` and limits output to 200 tokens for faster
+question/conclusion decisions; set `ARK_THINKING=enabled` or
+`ARK_MAX_OUTPUT_LENGTH` only if you need longer reasoning.
+
+To evaluate the complete held-out test split, run `./coin_env/bin/python eval_model.py 0 16 --split test --description-type category`. Use `--description-type all` to evaluate all six description variants.
+
+结果会写入 `results/`。如需切换回 Gemini 或本地 vLLM，可使用 `--oracle-provider gemini` / `--oracle-provider local`，并设置相应的环境变量。
+
 # Oracle
 
 To train/test your questioner, you need an Oracle. You can implement it however you want, but it needs to inherit from the class `OracleInterface` (check `Oracle.py`). In particular, it needs to implement the `ask` method. This will be used in `env.py`, lines 172-177.
 
-You can use a remote or local VLM for this. We provide two classes (in `utils.py`): `GeminiLLM`, which calls the Gemini API, and `ClientBasedLLM`, which uses a local VLM spawned from `vllm` (see next section). 
+The default Oracle is `create_doubao_client` in `utils.py`, which uses the OpenAI-compatible Volcano Engine ModelArk API and the image-understanding endpoint in `ARK_MODEL_ID`. `GeminiLLM` and `ClientBasedLLM` remain available only as optional alternatives.
 
 To use GeminiLLM, you need a Gemini API Key. After obtaining the key, create a file named `.env.ml` *IN YOUR HOME DIRECTORY* and add the following line
 > GEMINI_API_KEY="your api key here".

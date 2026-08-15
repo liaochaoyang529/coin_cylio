@@ -3,7 +3,10 @@ Author: e-zorzi
 License: Apache 2.0
 """
 
-from google import genai
+try:
+    from google import genai
+except ImportError:
+    genai = None
 import os
 import json
 import openai
@@ -11,8 +14,9 @@ from datetime import datetime
 from abc import ABC, abstractmethod
 import base64
 from io import BytesIO
+from pathlib import Path
 from attrs import define, field
-from typing import Optional, Union, Iterable
+from typing import Any, Optional, Union, Iterable
 import numpy as np
 from PIL import Image
 from colorama import Fore, init as colorama_init
@@ -31,17 +35,29 @@ _SAFEGUARD_N_LETTERS = _SAFEGUARD_N_TOKENS * 4
 
 # For images
 _SAFEGUARD_IMAGE_RESOLUTION = 1024
+_DEFAULT_ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
+
+
+def _require_gemini():
+    if genai is None:
+        raise ImportError(
+            "Gemini support requires the optional dependency google-genai. "
+            "Install it or use the default Doubao workflow instead."
+        )
 
 
 def load_api_keys(dotenv_path: str = None):
     from dotenv import load_dotenv
 
-    if dotenv_path is not None:
-        print(f"Loaded dotenv file at {dotenv_path}: {load_dotenv(dotenv_path)}")
-    else:
-        print(
-            f"Loaded dotenv file at $HOME/.env.ml: {load_dotenv(os.path.join(os.environ['HOME'], '.env.ml'))}"
-        )
+    if dotenv_path is None:
+        repo_dotenv = Path(__file__).resolve().with_name(".env")
+        legacy_dotenv = Path.home() / ".env.ml"
+        dotenv_path = repo_dotenv if repo_dotenv.exists() else legacy_dotenv
+
+    dotenv_path = Path(dotenv_path).expanduser()
+    loaded = load_dotenv(dotenv_path)
+    print(f"Loaded dotenv file at {dotenv_path}: {loaded}")
+    return loaded
 
 
 def _warn_requires_vllm(classname, model_id):
@@ -76,6 +92,7 @@ def encode_image_b64(image, format):
 def get_batch_result(
     info_file_path: Union[str, os.PathLike],
 ) -> tuple[bool, Optional[str]]:
+    _require_gemini()
     load_api_keys()
     with open(info_file_path, "r") as read_handle:
         batch_name = read_handle.readlines()[0]
@@ -162,6 +179,7 @@ class GeminiLLM(IRemoteLLM):
             raise ValueError()
 
     def __attrs_post_init__(self):
+        _require_gemini()
         if self.api_key is None:
             self.api_key = os.getenv(
                 "GEMINI_API_KEY",
@@ -356,12 +374,20 @@ class OpenAILLM(IRemoteLLM):
     temperature: float = field(default=1.0)
     top_p: float = field(default=0.95)
     max_output_length: int = field(default=12000)
+    timeout: float = field(default=90.0)
+    max_retries: int = field(default=0)
+    default_extra_body: Optional[dict[str, Any]] = field(default=None)
 
     def __attrs_post_init__(self):
         if self.api_key is None:
             self.api_key = os.getenv("OPENAI_API_KEY")
         try:
-            self._client = openai.OpenAI(api_key=self.api_key, base_url=self._url)
+            self._client = openai.OpenAI(
+                api_key=self.api_key,
+                base_url=self._url,
+                timeout=self.timeout,
+                max_retries=self.max_retries,
+            )
         except openai.OpenAIError as e:
             _warn_missing_key("OPENAI_API_KEY")
             raise e
@@ -408,6 +434,10 @@ class OpenAILLM(IRemoteLLM):
             )
 
         image_bytes = encode_image_b64(image, image_format)
+        request_kwargs = dict(kwargs)
+        if self.default_extra_body is not None and "extra_body" not in request_kwargs:
+            request_kwargs["extra_body"] = self.default_extra_body
+
         completion = self._client.chat.completions.create(
             model=self.model_id,
             messages=[
@@ -431,7 +461,7 @@ class OpenAILLM(IRemoteLLM):
             top_p=self.top_p,
             max_tokens=int(self.max_output_length / 4),
             stream=True,
-            **kwargs,
+            **request_kwargs,
         )
 
         return self._build_answer(completion, **kwargs)
@@ -443,6 +473,10 @@ class OpenAILLM(IRemoteLLM):
     ):
         if len(prompt) > _SAFEGUARD_N_LETTERS:
             _warn_prompt_too_long(len(prompt), _SAFEGUARD_N_LETTERS)
+
+        request_kwargs = dict(kwargs)
+        if self.default_extra_body is not None and "extra_body" not in request_kwargs:
+            request_kwargs["extra_body"] = self.default_extra_body
 
         completion = self._client.chat.completions.create(
             model=self.model_id,
@@ -461,7 +495,7 @@ class OpenAILLM(IRemoteLLM):
             top_p=self.top_p,
             max_tokens=int(self.max_output_length / 4),
             stream=True,
-            **kwargs,
+            **request_kwargs,
         )
 
         return self._build_answer(completion, **kwargs)
@@ -496,6 +530,35 @@ class OpenAILLM(IRemoteLLM):
             )
 
 
+def create_doubao_client(
+    model_id: Optional[str] = None,
+    temperature: float = 1e-6,
+) -> OpenAILLM:
+    """Create an OpenAI-compatible client for a ModelArk image model endpoint."""
+    if not os.getenv("ARK_API_KEY"):
+        load_api_keys()
+
+    api_key = os.getenv("ARK_API_KEY")
+    model_id = model_id or os.getenv("ARK_MODEL_ID")
+    if not api_key or not model_id:
+        raise ValueError(
+            "Doubao requires ARK_API_KEY and ARK_MODEL_ID. "
+            "ARK_MODEL_ID must identify an image-understanding model endpoint."
+        )
+
+    return OpenAILLM(
+        model_id=model_id,
+        api_key=api_key,
+        url=os.getenv("ARK_BASE_URL", _DEFAULT_ARK_BASE_URL),
+        temperature=temperature,
+        timeout=float(os.getenv("ARK_TIMEOUT_SECONDS", "90")),
+        max_output_length=int(os.getenv("ARK_MAX_OUTPUT_LENGTH", "800")),
+        default_extra_body={
+            "thinking": {"type": os.getenv("ARK_THINKING", "disabled")}
+        },
+    )
+
+
 @define(kw_only=True, auto_attribs=True)
 class ClientBasedLLM(OpenAILLM):
     """Client that handles a VLLM connection. The model_id passed to __init__ should match the model running via VLLM."""
@@ -510,4 +573,9 @@ class ClientBasedLLM(OpenAILLM):
         if self._url is None:
             self._url = f"http://localhost:{self._port}/v1"
 
-        self._client = openai.OpenAI(api_key=self.api_key, base_url=self._url)
+        self._client = openai.OpenAI(
+            api_key=self.api_key,
+            base_url=self._url,
+            timeout=self.timeout,
+            max_retries=self.max_retries,
+        )

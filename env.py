@@ -12,15 +12,28 @@ import time
 _MAX_TIME_ALLOWED = 600  # in seconds
 
 ANSWER_PROMPT = "You are a faithful assistant. Answer correnctly to the following question based on the above image: {QUESTION}. Be concise (under 15 words)."
+_GIT_LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1"
+
+
+def _is_transient_model_error(error):
+    error_text = f"{type(error).__name__}: {error}".casefold()
+    transient_markers = (
+        "connection error",
+        "connection reset",
+        "connection refused",
+        "temporarily unavailable",
+        "timed out",
+        "timeout",
+    )
+    return isinstance(error, (ConnectionError, TimeoutError)) or any(
+        marker in error_text for marker in transient_markers
+    )
 
 
 def _validate_action(action):
-    assert (
-        action["question"] is None
-        or action["conclusion"] is None
-        and not (action["question"] is None and action["conclusion"] is None)
-    ), (
-        "Wrong action format: one among 'question' and 'conclusion' must be None, but not both"
+    assert set(("question", "conclusion")).issubset(action), "Action is missing a required key"
+    assert (action["question"] is None) != (action["conclusion"] is None), (
+        "Wrong action format: exactly one of 'question' and 'conclusion' must be None"
     )
 
 
@@ -102,6 +115,20 @@ class QAEnv(gym.Env):
                 episodes.append(episode_data)
         return episodes
 
+    @staticmethod
+    def _open_image(path: Union[str, Path]) -> Image.Image:
+        """Open an asset and explain how to recover an unfetched LFS pointer."""
+        path = Path(path)
+        with path.open("rb") as image_file:
+            if image_file.read(len(_GIT_LFS_POINTER_PREFIX)) == _GIT_LFS_POINTER_PREFIX:
+                raise RuntimeError(
+                    f"Image asset {path} is a Git LFS pointer, not a PNG. "
+                    "Download the real images before evaluation, for example: "
+                    "hf download --repo-type dataset e-zorzi/images_coin_challenge "
+                    "--local-dir images --force-download"
+                )
+        return Image.open(path)
+
     def reset(
         self, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
@@ -124,7 +151,7 @@ class QAEnv(gym.Env):
 
         self.current_step = 0
 
-        self.current_target_image = Image.open(self.current_episode_data["path"])
+        self.current_target_image = self._open_image(self.current_episode_data["path"])
         # TODO select type of task here here
         self.current_task = self.current_episode_data["tasks"][self.task_type]
         self.current_distractor_idx = 0
@@ -147,6 +174,8 @@ class QAEnv(gym.Env):
         _validate_action(action)
 
         self.current_step += 1
+        if action["question"] is not None:
+            self.n_questions += 1
 
         # We compute this before the 'switching image logic' otherwise it will mess them up
         # (but the observation needs to be computed after)
@@ -169,12 +198,23 @@ class QAEnv(gym.Env):
 
         return observation, reward, terminated, truncated, info
 
-    @retry(stop_max_attempt_number=5, wait_fixed=80000)
+    @retry(
+        stop_max_attempt_number=3,
+        wait_exponential_multiplier=2000,
+        wait_exponential_max=15000,
+        retry_on_exception=_is_transient_model_error,
+    )
     def ask_oracle(self, prompt, image, description=None):
-        return self.oracle_client.ask(
+        model_name = getattr(
+            self.oracle_client, "model_id", type(self.oracle_client).__name__
+        )
+        print(f"[INFO] Asking Oracle ({model_name})...", flush=True)
+        answer = self.oracle_client.ask(
             prompt=prompt,
             images=[image],
         )
+        print("[INFO] Oracle responded", flush=True)
+        return answer
 
     def _get_observation(self, question: str = None) -> np.ndarray:
         """Extract observation from current episode data and step."""
@@ -185,7 +225,7 @@ class QAEnv(gym.Env):
         return dict(
             # Current observation (based on the current obs index)
             image=np.array(
-                Image.open(self.distractors[self.current_distractor_idx]["path"])
+                self._open_image(self.distractors[self.current_distractor_idx]["path"])
             ),
             answer=answer,
         )
