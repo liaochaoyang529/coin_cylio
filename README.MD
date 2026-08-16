@@ -4,7 +4,7 @@
 
 当前默认实现是 `YourQuestioner`：Questioner 与 Oracle 均可使用豆包（火山方舟）图片理解模型，Questioner 额外维护带来源和极性的结构化证据，以减少无依据的正向判断和过度保守的负向判断。
 
-详细设计、工程改进和限制见 [TECHNICAL_REPORT.md](TECHNICAL_REPORT.md)，PDF 版本见 [TECHNICAL_REPORT.pdf](TECHNICAL_REPORT.pdf)。
+详细设计、工程改进和限制见英文技术报告 [TECHNICAL_REPORT.md](TECHNICAL_REPORT.md)，英文 PDF 版本见 [TECHNICAL_REPORT.pdf](TECHNICAL_REPORT.pdf)。
 
 ## 评分规则
 
