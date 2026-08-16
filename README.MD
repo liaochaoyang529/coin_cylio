@@ -1,40 +1,61 @@
 # Coin Challenge Multimodal Questioner
 
-本仓库实现并评测一个多模态 Questioner。每个 episode 中，Questioner 只能看到一张候选图片和隐藏目标的文字描述；它可以向 Oracle 询问隐藏目标的视觉属性，或者判断当前候选是否与目标匹配。
+An evidence-grounded multimodal agent for an interactive image-matching challenge.
 
-当前默认实现是 `YourQuestioner`：Questioner 与 Oracle 均可使用豆包（火山方舟）图片理解模型，Questioner 额外维护带来源和极性的结构化证据，以减少无依据的正向判断和过度保守的负向判断。
+## Project Description
 
-详细设计、工程改进和限制见英文技术报告 [TECHNICAL_REPORT.md](TECHNICAL_REPORT.md)，英文 PDF 版本见 [TECHNICAL_REPORT.pdf](TECHNICAL_REPORT.pdf)。
+This repository implements and evaluates a multimodal `Questioner`. In each episode, the Questioner receives a textual description of a hidden target and sees one candidate image at a time. It must either ask an `Oracle` a concise visual question about the hidden target or conclude whether the current candidate matches it.
 
-## 评分规则
+The active implementation, `YourQuestioner`, combines an image-capable language model with deterministic control logic. The model interprets the visible candidate and proposes discriminative attributes. The controller maintains structured evidence, tracks answer polarity and provenance, enforces the action protocol, limits context growth, repairs malformed output, and gates unsupported conclusions.
 
-| 操作 | 奖励 |
+Questioner and Oracle use Doubao / Volcano Engine ModelArk by default. Gemini and local vLLM backends are also supported. The two roles have separate image permissions: the Questioner sees only the candidate image, while the Oracle sees only the hidden target image.
+
+For the detailed architecture, engineering improvements, limitations, and future work, see the English [technical report](TECHNICAL_REPORT.md) or its [PDF version](TECHNICAL_REPORT.pdf).
+
+## Repository Layout
+
+| Path | Purpose |
+| --- | --- |
+| `Questioner.py` | Questioner interface and the active `YourQuestioner` implementation |
+| `Oracle.py` | Minimal Oracle interface |
+| `env.py` | Gymnasium environment, validation, rewards, candidate transitions, and Oracle calls |
+| `utils.py` | Doubao, Gemini, and local vLLM clients plus image encoding |
+| `eval_model.py` | Evaluation CLI, provider setup, episode loop, summaries, and result writing |
+| `episodes_*.jsonl` | Train, validation, and test episode definitions |
+| `images/` | Image assets referenced by episode files |
+| `tests/` | Offline tests for memory, evidence gates, repair, transitions, and retries |
+| `scripts/` | Environment setup, asset download, dataset split, and vLLM launch helpers |
+| `results/` | Locally generated gzip JSON evaluation output |
+
+## Game and Scoring
+
+| Action | Reward |
 | --- | ---: |
-| 正确结论 | `+10` |
-| 错误结论 | `-10`，并结束当前 episode |
-| 向 Oracle 提问 | `-1` |
+| Correct conclusion | `+10` |
+| Incorrect conclusion | `-10` and the episode ends |
+| Oracle question | `-1` |
 
 ```text
-episode_reward = 10 * 正确结论数 - 10 * 错误结论数 - Oracle 提问数
+episode_reward = 10 * correct_conclusions - 10 * incorrect_conclusions - oracle_questions
 ```
 
-正确结论会切换到下一个候选；只有所有候选都判断正确，episode 才算完整成功。环境默认在 60 步或 600 秒后截断。
+A correct conclusion advances to the next candidate. An episode is fully successful only when every candidate is classified correctly. By default, the environment truncates an episode after 60 steps or 600 seconds.
 
-## 快速开始
+## Quick Start
 
-所有命令都应从仓库根目录运行，因为 episode 文件中的图片路径是仓库相对路径。
+Run every command from the repository root because episode files contain repository-relative image paths.
 
-### 1. 创建环境
+### 1. Create the Environment
 
 ```bash
 bash scripts/install.sh
 ```
 
-该脚本创建 `coin_env/` 并安装评测依赖。
+The installer creates `coin_env/` and installs the evaluation dependencies.
 
-### 2. 准备图片
+### 2. Download the Images
 
-使用 Hugging Face CLI：
+Using the Hugging Face CLI:
 
 ```bash
 mkdir -p images
@@ -42,21 +63,21 @@ hf download --repo-type dataset e-zorzi/images_coin_challenge \
   --local-dir images --force-download
 ```
 
-如果仓库中仍是 Git LFS 指针，或 Hugging Face 下载较慢，可以使用带校验的镜像下载器：
+If Git LFS pointers remain or Hugging Face is slow, use the validating mirror downloader:
 
 ```bash
 ./coin_env/bin/python scripts/download_images_mirror.py
 ```
 
-`env.py` 会主动拒绝 Git LFS 指针文件，避免把文本指针误当作 PNG。
+`env.py` rejects Git LFS pointer files so that a text pointer is never passed to Pillow as if it were a PNG image.
 
-### 3. 配置豆包
+### 3. Configure Doubao
 
 ```bash
 cp .env.example .env
 ```
 
-至少填写：
+At minimum, set:
 
 ```dotenv
 ARK_API_KEY=your_ark_api_key
@@ -64,11 +85,11 @@ ARK_MODEL_ID=your_image_understanding_endpoint_id
 ARK_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
 ```
 
-`.env` 已被 Git 忽略，不要提交真实密钥。Questioner 默认读取 `QUESTIONER_MODEL_ID`，未设置时回退到 `ARK_MODEL_ID`；Oracle 默认使用 `ARK_MODEL_ID`。
+The repository ignores `.env`; never commit real credentials. The Questioner uses `QUESTIONER_MODEL_ID` when set and otherwise falls back to `ARK_MODEL_ID`. The Doubao Oracle uses `ARK_MODEL_ID`.
 
-### 4. 运行小切片
+### 4. Run a Small Smoke Evaluation
 
-先运行付费较低的小切片，确认凭据、图片和端点正常：
+Start with a small, lower-cost slice to verify credentials, assets, and endpoint compatibility:
 
 ```bash
 QUESTIONER_PROVIDER=doubao \
@@ -78,11 +99,11 @@ QUESTIONER_PROVIDER=doubao \
   --oracle-provider doubao
 ```
 
-范围是左闭右开，`0 3` 表示 episode 0、1、2。
+The positional range is half-open. `0 3` runs episodes 0, 1, and 2.
 
-### 5. 运行完整测试集
+### 5. Run the Complete Test Split
 
-只运行 `category`：
+Run only the `category` description:
 
 ```bash
 QUESTIONER_PROVIDER=doubao \
@@ -92,7 +113,7 @@ QUESTIONER_PROVIDER=doubao \
   --oracle-provider doubao
 ```
 
-运行全部六种描述类型：
+Run all six description types:
 
 ```bash
 QUESTIONER_PROVIDER=doubao \
@@ -102,17 +123,17 @@ QUESTIONER_PROVIDER=doubao \
   --oracle-provider doubao
 ```
 
-支持 `category`、`color`、`context`、`color_context_feature`、`color_feature`、`color_context`；`all` 会依次执行全部六类。
+Supported description types are `category`, `color`, `context`, `color_context_feature`, `color_feature`, and `color_context`. `all` runs all six in sequence.
 
-完整 CLI 参数以实际代码为准：
+Use the live CLI help as the authoritative option reference:
 
 ```bash
 ./coin_env/bin/python eval_model.py --help
 ```
 
-## 后台运行
+## Running in the Background
 
-完整六类型评测会产生较多 API 调用。需要关闭终端时，应在启动时使用 `nohup`，不要在运行中仅依赖 `disown`，因为进程输出可能仍绑定终端。
+A full six-description evaluation can make many paid API calls. If the terminal must be closed, start the process with `nohup`; applying only `disown` after launch may leave process output attached to the terminal.
 
 ```bash
 mkdir -p logs
@@ -125,55 +146,55 @@ nohup env QUESTIONER_PROVIDER=doubao \
   > logs/test_all.log 2>&1 < /dev/null &
 ```
 
-查看日志：
+Follow progress with:
 
 ```bash
 tail -f logs/test_all.log
 ```
 
-当前评测器只在一种 description type 全部完成后写结果，不支持逐 episode 自动断点续跑。中断当前类型会丢失该类型尚未写盘的进度。
+The evaluator currently writes a result only after one complete description type. It does not checkpoint after every episode, so interrupting the current description type loses its unwritten progress.
 
-## 输出与指标
+## Results and Metrics
 
-结果写入：
+Results are written to:
 
 ```text
 results/<QuestionerClass>_<description>_<split>_<start>_<end>.gzip.json
 ```
 
-例如：
+Example:
 
 ```text
 results/YourQuestioner_category_test_0_16.gzip.json
 ```
 
-gzip JSON 包含 episode ID、目标图、描述、动作、Oracle 回答、reasoning、结论/提问计数、奖励、完整成功状态和耗时。
+Each gzip JSON file includes episode IDs, target images, descriptions, actions, Oracle answers, reasoning, conclusion and question counts, rewards, full-episode success flags, and timing.
 
-控制台指标：
+The console summary reports:
 
-- `Decision accuracy`：正确结论数 / 总结论数
-- `Oracle questions`：提问总数和 episode 平均数
-- `Environment reward`：总奖励和 episode 平均奖励
-- `Questioner time`：Questioner 平均模型耗时
-- `Full-match rate`：所有候选均判断正确的 episode 比例
+- `Decision accuracy`: correct conclusions divided by all conclusions;
+- `Oracle questions`: total and average questions per episode;
+- `Environment reward`: total and average reward per episode;
+- `Questioner time`: average Questioner model latency;
+- `Full-match rate`: fraction of episodes in which every candidate was classified correctly.
 
-## 模型配置
+## Model Configuration
 
-### 豆包 / 火山方舟
+### Doubao / Volcano Engine ModelArk
 
-| 环境变量 | 默认值 | 作用 |
+| Environment variable | Default | Purpose |
 | --- | --- | --- |
-| `ARK_API_KEY` | 无 | 火山方舟 API Key，必填 |
-| `ARK_MODEL_ID` | 无 | 支持图片理解的端点 ID，必填 |
-| `ARK_BASE_URL` | 北京地域 API 地址 | OpenAI 兼容 API 地址 |
-| `ARK_TIMEOUT_SECONDS` | `90` | 单次请求超时 |
-| `ARK_MAX_OUTPUT_LENGTH` | `800` | 输出字符预算，约对应 200 token |
-| `ARK_THINKING` | `disabled` | 方舟 thinking 参数 |
-| `QUESTIONER_PROVIDER` | `doubao` | Questioner 后端 |
-| `QUESTIONER_MODEL_ID` | `ARK_MODEL_ID` | Questioner 模型/端点 |
-| `ORACLE_PROVIDER` | `doubao` | 未传 CLI 参数时的 Oracle 后端 |
+| `ARK_API_KEY` | none | Required Volcano Engine API key |
+| `ARK_MODEL_ID` | none | Required image-capable endpoint ID |
+| `ARK_BASE_URL` | Beijing API URL | OpenAI-compatible API base URL |
+| `ARK_TIMEOUT_SECONDS` | `90` | Per-request timeout |
+| `ARK_MAX_OUTPUT_LENGTH` | `800` | Output character budget, approximately 200 tokens |
+| `ARK_THINKING` | `disabled` | ModelArk thinking parameter |
+| `QUESTIONER_PROVIDER` | `doubao` | Questioner backend |
+| `QUESTIONER_MODEL_ID` | `ARK_MODEL_ID` | Questioner model or endpoint |
+| `ORACLE_PROVIDER` | `doubao` | Oracle backend when no CLI option is provided |
 
-Questioner 和 Oracle 使用同一豆包端点时，可以显式设置：
+To use the same Doubao endpoint for Questioner and Oracle:
 
 ```bash
 QUESTIONER_PROVIDER=doubao \
@@ -183,11 +204,11 @@ ARK_MODEL_ID=doubao-seed-2-1-turbo-260628 \
   --split test --description-type category --oracle-provider doubao
 ```
 
-模型名应替换为实际方舟端点 ID。
+Replace the example model name with the actual ModelArk endpoint ID.
 
 ### Gemini
 
-设置 `GEMINI_API_KEY`，并运行：
+Set `GEMINI_API_KEY`, then run:
 
 ```bash
 QUESTIONER_PROVIDER=gemini \
@@ -195,15 +216,17 @@ QUESTIONER_PROVIDER=gemini \
   --split test --description-type category --oracle-provider gemini
 ```
 
-`google-genai` 是可选依赖；默认豆包流程不要求安装它。
+`google-genai` is optional and is not required by the default Doubao workflow.
 
-### 本地 vLLM
+### Local vLLM
+
+Start the local server:
 
 ```bash
 bash scripts/launch_qwen35_vllm.sh
 ```
 
-另一个终端中运行：
+In another terminal, run:
 
 ```bash
 QUESTIONER_PROVIDER=local \
@@ -213,35 +236,35 @@ ORACLE_MODEL_ID=local-qwen35-4b \
   --split test --description-type category --oracle-provider local
 ```
 
-`ClientBasedLLM` 当前连接 `http://localhost:8000/v1`，模型名必须与 vLLM 的 `--served-model-name` 一致。
+`ClientBasedLLM` currently connects to `http://localhost:8000/v1`. The model name must exactly match the vLLM `--served-model-name` value.
 
-## 当前 Questioner 策略
+## Current Questioner Strategy
 
-`YourQuestioner` 的主要流程：
+`YourQuestioner` follows this control flow:
 
-1. 豆包读取当前候选图，并输出紧凑 JSON 动作。
-2. 类别明显不匹配或存在可靠冲突时直接判 `0`。
-3. 同类别且信息不足时，询问候选特异的原子 Yes/No 问题。
-4. Oracle 回答解析为 `yes`、`no` 或 `uncertain`，并绑定属性和候选来源。
-5. 当前候选出现直接 `no` 时，控制器强制判 `0`。
-6. 类别描述下，两个不同属性均为直接 `yes` 且无冲突时，控制器强制判 `1`。
-7. 无效 JSON、重复问题或缺乏证据的结论最多修复一次，再执行受证据门控的回退。
+1. The multimodal model inspects the current candidate and returns a compact JSON action.
+2. A clear category mismatch or reliable conflict permits an immediate conclusion of `0`.
+3. For a same-category candidate with insufficient evidence, the model asks an atomic yes/no question about a distinctive visible attribute.
+4. The Oracle answer is parsed as `yes`, `no`, or `uncertain` and stored with its attribute and candidate provenance.
+5. A direct `no` for the current candidate forces conclusion `0`.
+6. For a category-only description, two direct `yes` answers for independent attributes with no conflict permit conclusion `1`.
+7. Invalid JSON, repeated questions, or unsupported conclusions receive at most one repair attempt before an evidence-gated fallback.
 
-默认记忆限制：
+Default memory and retry limits:
 
-| 环境变量 | 默认值 |
+| Environment variable | Default |
 | --- | ---: |
 | `QUESTIONER_MAX_QUESTIONS_PER_CANDIDATE` | `2` |
 | `QUESTIONER_MAX_EVIDENCE_ITEMS` | `12` |
 | `QUESTIONER_MAX_MEMORY_CHARS` | `6000` |
 | `QUESTIONER_API_ATTEMPTS` | `2` |
-| `QUESTIONER_API_RETRY_DELAY` | `1` 秒 |
+| `QUESTIONER_API_RETRY_DELAY` | `1` second |
 
-候选切换时清空候选状态，但目标证据在同一 episode 内保留。
+Candidate-local state is cleared when the candidate image changes, while target evidence persists for the complete episode.
 
-## 接口约束
+## Extension Interfaces
 
-自定义 Questioner 必须继承 `QuestionerInterface` 并实现 `ask_or_conclude(observation)`。
+A custom Questioner must inherit `QuestionerInterface` and implement `ask_or_conclude(observation)`.
 
 ```python
 observation = {
@@ -256,30 +279,32 @@ action = {
 }
 ```
 
-`question` 和 `conclusion` 必须恰好一个非 `None`。问题长度最多 300 字符，只能询问隐藏目标。评测器还会读取 `questions`、`answers`、`n_questions` 和 `time_required`。
+Exactly one of `question` and `conclusion` must be non-`None`. A question may contain at most 300 characters and must concern the hidden target. The evaluator also reads `questions`, `answers`, `n_questions`, and `time_required` from the Questioner.
 
-自定义 Oracle 需要实现：
+A custom Oracle must implement:
 
 ```python
 def ask(*, prompt, images) -> str:
     ...
 ```
 
-当前客户端每次多模态请求只支持一张图片。
+Current clients support exactly one image per multimodal request.
 
-## 数据划分
+## Dataset Splits
 
-`split_manifest.json` 记录了 seed 2026 的 80/10/10 划分：
+`split_manifest.json` records a reproducible 80/10/10 split created with seed 2026:
 
-| 文件 | 数量 |
+| File | Episodes |
 | --- | ---: |
 | `episodes_train_split.jsonl` | 134 |
 | `episodes_val.jsonl` | 17 |
 | `episodes_test.jsonl` | 16 |
 
-注意：`eval_model.py --split train` 当前读取 `episodes_train.jsonl`，不是 `episodes_train_split.jsonl`。严格实验不要把两者混用或覆盖原始数据。
+Important: `eval_model.py --split train` currently reads `episodes_train.jsonl`, not `episodes_train_split.jsonl`. Do not mix the two files or overwrite the original dataset when split isolation matters.
 
-## 验证代码改动
+## Validation
+
+Run the offline checks after code changes:
 
 ```bash
 ./coin_env/bin/python -m unittest discover -s tests
@@ -290,31 +315,31 @@ def ask(*, prompt, images) -> str:
 ./coin_env/bin/python eval_model.py --help
 ```
 
-当前测试覆盖 Questioner 记忆、候选切换、证据门控、重复问题、输出修复、上下文预算和临时错误重试。
+The tests cover Questioner memory, candidate transitions, evidence gates, repeated questions, output repair, context limits, and transient-error retry classification.
 
-## 常见问题
+## Troubleshooting
 
-### 图片无法打开
+### Images Cannot Be Opened
 
 ```bash
 ./coin_env/bin/python scripts/download_images_mirror.py
 ```
 
-### 豆包返回 `429 SetLimitExceeded`
+### Doubao Returns `429 SetLimitExceeded`
 
-检查端点限流、并发额度、账户余额和模型配额。当前代码只重试连接错误和超时，不会无限重试额度或参数错误。
+Check endpoint rate limits, concurrency limits, account balance, and model quota. The current code retries connection failures and timeouts only; quota and parameter errors are not retried indefinitely.
 
-### 中途退出后结果缺失
+### Results Are Missing After an Interrupted Run
 
-结果只在当前 description type 完成后写入。建议使用小范围切片、按 description type 分开运行，或启动时使用 `nohup`。当前版本没有自动合并分片结果。
+Results are written only when the current description type completes. Use smaller ranges, run description types separately, or launch with `nohup`. The current version does not automatically merge result shards.
 
-### 为什么详细描述模式奖励下降
+### Detailed Description Modes Have Lower Reward
 
-固定两问预算在弱描述上较有价值，但在信息丰富的描述上可能产生不必要的 Oracle 成本。技术报告说明了该设计权衡和自适应提问方向。
+The fixed two-question budget is useful for weak descriptions but can add unnecessary Oracle cost when the description already contains strong visual details. The technical report discusses this tradeoff and an adaptive-questioning direction.
 
-## 安全与仓库卫生
+## Security and Repository Hygiene
 
-- 不要提交 `.env`、API Key、结果、日志、虚拟环境或下载缓存。
-- 不要提交下载后的真实图片替换，除非任务明确要求更新资产。
-- `results/` 是本地生成目录，不是比赛源码。
-- 提交前运行 `git diff --check` 和离线测试。
+- Never commit `.env`, API keys, results, logs, virtual environments, or download caches.
+- Do not commit downloaded replacements for image assets unless the task explicitly updates those assets.
+- `results/` is generated locally and is not part of the competition source.
+- Run `git diff --check` and the offline tests before committing code changes.
