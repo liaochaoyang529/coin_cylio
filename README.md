@@ -5,10 +5,6 @@ interactive image-matching game. Given a textual description of a hidden target 
 candidate image at a time, `YourQuestioner` either asks the Oracle a concise question
 about the hidden target or concludes whether the candidate matches.
 
-The repository contains only the core agent code. Datasets, image assets, and runtime
-engineering scripts are not part of the submission; the evaluation harness supplies the
-data and runs the agent.
-
 ## Core Code
 
 | File | Purpose |
@@ -18,6 +14,24 @@ data and runs the agent.
 | `env.py` | Gymnasium environment: rewards, transitions, and Oracle calls |
 | `utils.py` | Model clients (Doubao/ModelArk, Gemini, local vLLM) and image helpers |
 | `eval_model.py` | Evaluation loop, provider setup, and result writing |
+
+## Running the Evaluation
+
+Run from the repository root with model credentials in the environment (Doubao requires
+`ARK_API_KEY` and an image-capable `ARK_MODEL_ID`). The positional range is half-open;
+this evaluates the full test set (episodes 0-15):
+
+```bash
+python eval_model.py 0 16 \
+  --split test --description-type color_context_feature --oracle-provider doubao
+```
+
+Other description types are `category`, `color`, `context`, `color_feature`,
+`color_context`, or `all`; `--split` may be `train`, `val`, or `test`. See
+`python eval_model.py --help` for the authoritative options.
+
+Results are written to `results/<QuestionerClass>_<description>_<split>_<start>_<end>.gzip.json`.
+Model calls are stochastic, so reruns do not reproduce identical numbers.
 
 ## Game and Scoring
 
